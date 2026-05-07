@@ -3,22 +3,23 @@ import base64
 import json
 import re
 import requests
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-TELEGRAM_TOKEN = "7824261761:AAFtcGQPMNNeBeqVd8zwqzXkq_QSauXH5MQ"
-GEMINI_API_KEY = "AIzaSyA118Lc9tg1AgYf_quIDYkQNil3xSb-ick"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 WAITING_FOR_USERNAME = 1
 user_images = {}
 
-async def start(update, context):
-    await update.message.reply_text("👋 Stats Bot এ স্বাগতম!\n\n📊 Screenshot পাঠাও\nতারপর username লিখো\n✅ Final Adds বলে দেব!")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Stats Bot!\n\n📊 Screenshot পাঠাও\nতারপর username লিখো\n✅ Final Adds বলে দেব!")
 
-async def handle_photo(update, context):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
@@ -27,7 +28,7 @@ async def handle_photo(update, context):
     await update.message.reply_text("✅ Screenshot পেয়েছি!\n\nএখন username লিখো 👇")
     return WAITING_FOR_USERNAME
 
-async def handle_username(update, context):
+async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.text.strip()
     if user_id not in user_images:
@@ -50,10 +51,11 @@ async def handle_username(update, context):
         await update.message.reply_text(msg, parse_mode='Markdown')
         del user_images[user_id]
     except Exception as e:
+        logger.error(f"Error: {e}")
         await update.message.reply_text("❌ সমস্যা হয়েছে। আবার try করো।")
     return ConversationHandler.END
 
-async def cancel(update, context):
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ বাতিল।")
     return ConversationHandler.END
 
