@@ -1,257 +1,386 @@
-import logging
-import os
-import requests
-import csv
-import io
+import logging, os, requests, csv, io, json
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 SHEET_ID = "18de83dHTjl1azVEcvep8heLjLOYWGCKcNh4vxepA85o"
-SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+USERS_FILE = "users.json"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-WAITING_USERNAME = 1
-WAITING_FILTER = 2
+WAITING_USERNAME, WAITING_FILTER, WAITING_FROM, WAITING_TO, WAITING_SPECIFIC = 1, 2, 3, 4, 5
 
-user_sessions = {}
+sessions = {}
+last_count = [0]
+notified_today = [set()]
 
-def get_sheet_rows():
+def load_users():
     try:
-        resp = requests.get(SHEET_CSV_URL, timeout=10)
-        resp.encoding = 'utf-8'
-        reader = csv.reader(io.StringIO(resp.text))
-        return list(reader)
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE) as f:
+                return json.load(f)
+    except: pass
+    return {}
+
+def save_users(u):
+    try:
+        with open(USERS_FILE, 'w') as f:
+            json.dump(u, f)
+    except: pass
+
+def register_user(user):
+    users = load_users()
+    uid = str(user.id)
+    now = datetime.now().strftime('%d.%m.%Y %H:%M')
+    users[uid] = {
+        'id': user.id,
+        'name': user.full_name,
+        'username': f"@{user.username}" if user.username else "—",
+        'first_seen': users.get(uid, {}).get('first_seen', now),
+        'last_seen': now,
+        'searches': users.get(uid, {}).get('searches', 0) + 1
+    }
+    save_users(users)
+
+def get_rows():
+    try:
+        r = requests.get(SHEET_URL, timeout=10)
+        r.encoding = 'utf-8'
+        return list(csv.reader(io.StringIO(r.text)))
     except Exception as e:
-        logger.error(f"Sheet error: {e}")
+        logger.error(e)
         return []
 
-def get_headers_idx(headers):
-    h = [x.strip().lower() for x in headers]
-    return {
-        'nick': next((i for i, x in enumerate(h) if 'nick' in x), 1),
-        'date': next((i for i, x in enumerate(h) if 'date' in x), 0),
-        'iss': next((i for i, x in enumerate(h) if 'initial' in x and 'ss' in x), 2),
-        'ino': next((i for i, x in enumerate(h) if 'initial' in x and 'no' in x), 3),
-        'css': next((i for i, x in enumerate(h) if 'closing' in x and 'ss' in x), 4),
-        'cno': next((i for i, x in enumerate(h) if 'closing' in x and 'no' in x), 5),
-        'final': next((i for i, x in enumerate(h) if 'final' in x), 6),
-        'source': next((i for i, x in enumerate(h) if 'source' in x), 7),
-    }
+def parse_date(s):
+    s = s.strip()
+    for fmt in ['%d.%m.%Y', '%d.%m.%y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m']:
+        try:
+            d = datetime.strptime(s, fmt)
+            if fmt == '%d.%m':
+                d = d.replace(year=datetime.now().year)
+            return d
+        except: pass
+    return None
 
-def find_user_data(username, rows, hidx):
-    results = {}
+def find_user(username, rows):
+    res = {}
+    ul = username.strip().lower()
     for row in rows:
-        if len(row) <= hidx['nick']:
-            continue
-        if row[hidx['nick']].strip().lower() == username.strip().lower():
-            date = row[hidx['date']].strip() if len(row) > hidx['date'] else 'Unknown'
-            if not date:
-                date = 'Unknown'
-            results[date] = {
-                'date': date,
-                'nick': row[hidx['nick']].strip(),
-                'ino': row[hidx['ino']].strip() if len(row) > hidx['ino'] else '—',
-                'cno': row[hidx['cno']].strip() if len(row) > hidx['cno'] else '—',
-                'final': row[hidx['final']].strip() if len(row) > hidx['final'] else '—',
-                'source': row[hidx['source']].strip() if len(row) > hidx['source'] else '—',
+        if len(row) < 2: continue
+        if row[1].strip().lower() == ul:
+            ds = row[0].strip() if row[0].strip() else None
+            if not ds: continue
+            res[ds] = {
+                'date_str': ds,
+                'date_obj': parse_date(ds),
+                'nick': row[1].strip(),
+                'ino': row[3].strip() if len(row) > 3 else '—',
+                'cno': row[5].strip() if len(row) > 5 else '—',
+                'final': row[6].strip() if len(row) > 6 else '—',
+                'source': row[7].strip() if len(row) > 7 else '—',
             }
-    return results if results else None
+    return res or None
 
-def format_row(row):
-    source_line = f"🌐 *{row['source']}*\n" if row['source'] and row['source'] != '—' else ""
+def fmt_row(row):
+    try:
+        f = int(row['final'])
+        m = "🥇" if f>=50 else "🥈" if f>=30 else "🥉" if f>=10 else "✅" if f>0 else "❌"
+    except: m = "⚡"
+    src = f"║   🌐 _{row['source']}_\n" if row['source'] not in ['—',''] else ""
     return (
-        f"👤 *{row['nick']}* | 📅 *{row['date']}*\n"
-        f"▶️ Initial: *{row['ino']}* | 🔄 Closing: *{row['cno']}*\n"
-        f"⚡ Final Adds: *{row['final']}*\n"
-        f"{source_line}"
-        f"━━━━━━━━━━━━━━━\n"
+        f"╔══════════════════════\n"
+        f"║ 👤 *{row['nick']}*\n"
+        f"║ 📅 *{row['date_str']}*\n"
+        f"╠══════════════════════\n"
+        f"║ ▶️  Initial:  *{row['ino']}*\n"
+        f"║ 🔄 Closing:  *{row['cno']}*\n"
+        f"║ {m} Final:    *{row['final']}*\n"
+        f"{src}"
+        f"╚══════════════════════\n\n"
     )
 
-def make_filter_keyboard():
-    return [
+def filter_data(all_data, mode, **kw):
+    today = datetime.now().date()
+    res = {}
+    for uname, udata in all_data.items():
+        filtered = {}
+        for ds, row in udata.items():
+            d = row['date_obj']
+            ok = False
+            if mode == 'today':
+                ok = bool(d and d.date() == today)
+            elif mode == 'last_n':
+                ok = bool(d and d.date() >= today - timedelta(days=kw.get('n',7)-1))
+            elif mode == 'range':
+                df, dt = kw.get('df'), kw.get('dt')
+                ok = bool(d and df and dt and df <= d.date() <= dt)
+            elif mode == 'specific':
+                tgt = kw.get('tgt')
+                ok = bool(d and tgt and d.date() == tgt)
+            elif mode == 'all':
+                ok = True
+            if ok:
+                filtered[ds] = row
+        if filtered:
+            res[uname] = filtered
+    return res
+
+def build_report(fdata, title):
+    if not fdata: return None
+    msg = f"📊 *{title}*\n{'━'*22}\n\n"
+    total, count = 0, 0
+    for udata in fdata.values():
+        for row in sorted(udata.values(), key=lambda x: x['date_obj'] or datetime.min, reverse=True):
+            msg += fmt_row(row)
+            try: total += int(row['final']); count += 1
+            except: pass
+    if count > 1:
+        msg += f"{'━'*22}\n📈 *Total Final Adds: {total}*\n👥 *Entries: {count}*"
+    return msg
+
+async def send_msg(update, msg, rm=None):
+    for i, chunk in enumerate([msg[i:i+4000] for i in range(0,len(msg),4000)]):
+        await update.message.reply_text(chunk, parse_mode='Markdown',
+            reply_markup=rm if i == len(msg)//4000 else None)
+
+def main_kb():
+    today = datetime.now().strftime('%d.%m.%Y')
+    return ReplyKeyboardMarkup([
+        [f'🌅 Today  ({today})'],
         ['📋 All Data'],
         ['1️⃣ Last 1', '2️⃣ Last 2', '3️⃣ Last 3'],
         ['4️⃣ Last 4', '5️⃣ Last 5', '6️⃣ Last 6'],
-        ['7️⃣ Last 7', '🔟 Last 10', '📅 Last 14'],
-        ['📅 Last 15', '📅 Last 20', '📅 Last 25'],
-        ['📅 Last 30'],
-        ['🗓 Specific Date'],
-        ['🔄 নতুন Username', '❌ বাতিল']
-    ]
+        ['7️⃣ Last 7', '🔟 Last 10', '📆 Last 14'],
+        ['📆 Last 15', '📆 Last 20', '📆 Last 25'],
+        ['📆 Last 30'],
+        ['📆 Custom Range', '🗓 Specific Date'],
+        ['🔄 New Search', '❌ Exit']
+    ], resize_keyboard=True)
 
-def make_date_keyboard(all_data):
-    all_dates = set()
-    for udata in all_data.values():
-        all_dates.update(udata.keys())
-    dates = sorted(all_dates, reverse=True)[:30]
-    keyboard = []
-    row = []
-    for date in dates:
-        row.append(date)
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append(['⬅️ Back', '❌ বাতিল'])
-    return keyboard, dates
-
-def get_last_n_dates(all_data, n):
-    all_dates = set()
-    for udata in all_data.values():
-        all_dates.update(udata.keys())
-    return sorted(all_dates, reverse=True)[:n]
+def date_kb(all_data):
+    dates = sorted({ds for udata in all_data.values() for ds in udata}, reverse=True)[:30]
+    rows, r = [], []
+    for d in dates:
+        r.append(d)
+        if len(r)==3: rows.append(r); r=[]
+    if r: rows.append(r)
+    rows.append(['⬅️ Back', '❌ Exit'])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.message.from_user)
     await update.message.reply_text(
-        "👋 *Adds Tracker Bot*\n\n"
-        "Username লিখো!\n"
-        "_(একাধিক: space দিয়ে লিখো)_",
-        parse_mode='Markdown',
-        reply_markup=ReplyKeyboardRemove()
+        "🤖 *ADDS TRACKER BOT*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👤 Username লিখো!\n\n"
+        "💡 _একাধিক username:_\n"
+        "_space দিয়ে লিখো_\n"
+        "_(যেমন: DANIELghjo ESMEExvbw)_",
+        parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
     )
     return WAITING_USERNAME
 
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    uid = update.message.from_user.id
+    register_user(update.message.from_user)
     text = update.message.text.strip()
 
-    if text in ['🔄 নতুন Username', '❌ বাতিল']:
+    if text in ['🔄 New Search', '❌ Exit']:
         await update.message.reply_text("👤 Username লিখো:", reply_markup=ReplyKeyboardRemove())
         return WAITING_USERNAME
 
-    await update.message.reply_text("🔍 খুঁজছি...", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("⏳ _Searching..._", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
 
-    usernames = text.split()
-    rows = get_sheet_rows()
+    rows = get_rows()
     if not rows or len(rows) < 2:
-        await update.message.reply_text("❌ Sheet থেকে data আনতে পারছি না!")
+        await update.message.reply_text("❌ Sheet connect হচ্ছে না!")
         return WAITING_USERNAME
 
-    hidx = get_headers_idx(rows[0])
-    all_data = {}
-    not_found = []
-
-    for username in usernames:
-        udata = find_user_data(username, rows[1:], hidx)
-        if udata:
-            all_data[username] = udata
-        else:
-            not_found.append(username)
+    all_data, not_found = {}, []
+    for uname in text.split():
+        d = find_user(uname, rows[1:])
+        if d: all_data[uname] = d
+        else: not_found.append(uname)
 
     if not all_data:
-        msg = "❌ কোনো user পাওয়া যায়নি!\n"
-        if not_found:
-            msg += f"পাওয়া যায়নি: {', '.join(not_found)}"
-        await update.message.reply_text(msg)
+        await update.message.reply_text(f"❌ পাওয়া যায়নি: *{', '.join(not_found)}*", parse_mode='Markdown')
         return WAITING_USERNAME
 
-    user_sessions[user_id] = {'all_data': all_data, 'mode': 'filter'}
+    sessions[uid] = {'all_data': all_data, 'mode': 'filter'}
+    extra = f"\n⚠️ _পাওয়া যায়নি: {', '.join(not_found)}_" if not_found else ""
+    found = ' | '.join(all_data.keys())
 
-    extra = f"\n⚠️ পাওয়া যায়নি: {', '.join(not_found)}" if not_found else ""
-    found_names = ', '.join(all_data.keys())
-
-    reply_markup = ReplyKeyboardMarkup(make_filter_keyboard(), resize_keyboard=True)
     await update.message.reply_text(
-        f"✅ *{found_names}*{extra}\n\n📊 কত দিনের data দেখতে চাও?",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
+        f"✅ *Found:* {found}{extra}\n\n📊 কোন period এর data দেখতে চাও?",
+        parse_mode='Markdown', reply_markup=main_kb()
     )
     return WAITING_FILTER
 
 async def handle_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    selected = update.message.text.strip()
+    uid = update.message.from_user.id
+    sel = update.message.text.strip()
 
-    if selected == '❌ বাতিল':
-        await update.message.reply_text("❌ বাতিল।", reply_markup=ReplyKeyboardRemove())
+    if sel == '❌ Exit':
+        await update.message.reply_text("👋 _Bye!_", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
         return WAITING_USERNAME
-
-    if selected == '🔄 নতুন Username':
+    if sel == '🔄 New Search':
         await update.message.reply_text("👤 Username লিখো:", reply_markup=ReplyKeyboardRemove())
         return WAITING_USERNAME
-
-    if user_id not in user_sessions:
+    if uid not in sessions:
         await update.message.reply_text("⚠️ আবার username লিখো:", reply_markup=ReplyKeyboardRemove())
         return WAITING_USERNAME
 
-    session = user_sessions[user_id]
-    all_data = session['all_data']
+    all_data = sessions[uid]['all_data']
 
-    # Specific Date mode
-    if selected == '🗓 Specific Date':
-        keyboard, dates = make_date_keyboard(all_data)
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text("📅 কোন date?", reply_markup=reply_markup)
-        user_sessions[user_id]['mode'] = 'date'
+    if sel == '🗓 Specific Date':
+        sessions[uid]['mode'] = 'date'
+        await update.message.reply_text("📅 Date select করো:", reply_markup=date_kb(all_data))
         return WAITING_FILTER
 
-    if selected == '⬅️ Back':
-        reply_markup = ReplyKeyboardMarkup(make_filter_keyboard(), resize_keyboard=True)
-        await update.message.reply_text("📊 কত দিনের data?", reply_markup=reply_markup)
-        user_sessions[user_id]['mode'] = 'filter'
+    if sel == '⬅️ Back':
+        sessions[uid]['mode'] = 'filter'
+        await update.message.reply_text("📊 Period select করো:", reply_markup=main_kb())
         return WAITING_FILTER
 
-    # Specific date selected
-    if session.get('mode') == 'date':
-        msg = f"📊 *{selected}*\n━━━━━━━━━━━━━━━\n"
-        found = False
-        for username, udata in all_data.items():
-            if selected in udata:
-                msg += format_row(udata[selected])
-                found = True
-        if not found:
-            keyboard, _ = make_date_keyboard(all_data)
-            await update.message.reply_text(
-                f"❌ *{selected}* তারিখে data নেই!",
-                parse_mode='Markdown',
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
+    if sel == '📆 Custom Range':
+        await update.message.reply_text(
+            "📆 *Custom Date Range*\n\n"
+            "From date লিখো:\n"
+            "_(Format: DD.MM.YYYY)_\n"
+            "_(যেমন: 01.05.2026)_",
+            parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
+        )
+        return WAITING_FROM
+
+    if sessions[uid].get('mode') == 'date':
+        d = parse_date(sel)
+        if not d:
+            await update.message.reply_text("❌ Date ঠিকমতো select করো!", reply_markup=date_kb(all_data))
             return WAITING_FILTER
-        keyboard, _ = make_date_keyboard(all_data)
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        if len(msg) > 4000:
-            for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
-                await update.message.reply_text(chunk, parse_mode='Markdown')
-            await update.message.reply_text("👆", reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+        fdata = filter_data(all_data, 'specific', tgt=d.date())
+        title = f"📅 {sel}"
+        msg = build_report(fdata, title) or f"❌ *{sel}* তারিখে data নেই!"
+        chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
+        for i, chunk in enumerate(chunks):
+            rm = date_kb(all_data) if i==len(chunks)-1 else None
+            await update.message.reply_text(chunk, parse_mode='Markdown', reply_markup=rm)
         return WAITING_FILTER
 
-    # Last N days
-    n = 30
-    if selected == '📋 All Data':
-        n = 30
-    elif 'Last' in selected:
-        try:
-            n = int(''.join(filter(str.isdigit, selected)))
-        except:
-            n = 7
-
-    dates_to_show = get_last_n_dates(all_data, n)
-
-    if not dates_to_show:
-        await update.message.reply_text("❌ কোনো data নেই!")
-        return WAITING_FILTER
-
-    label = "All Data (Last 30)" if selected == '📋 All Data' else selected
-    msg = f"📊 *{label}*\n━━━━━━━━━━━━━━━\n"
-    for date in dates_to_show:
-        for username, udata in all_data.items():
-            if date in udata:
-                msg += format_row(udata[date])
-
-    reply_markup = ReplyKeyboardMarkup(make_filter_keyboard(), resize_keyboard=True)
-    if len(msg) > 4000:
-        for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
-            await update.message.reply_text(chunk, parse_mode='Markdown')
-        await update.message.reply_text("👆", reply_markup=reply_markup)
+    today_str = datetime.now().strftime('%d.%m.%Y')
+    if sel.startswith('🌅 Today'):
+        fdata = filter_data(all_data, 'today')
+        title = f"🌅 Today  {today_str}"
+    elif sel == '📋 All Data':
+        fdata = filter_data(all_data, 'all')
+        title = "📋 All Data"
+    elif 'Last' in sel:
+        try: n = int(''.join(filter(str.isdigit, sel)))
+        except: n = 7
+        fdata = filter_data(all_data, 'last_n', n=n)
+        title = f"📆 {sel}"
     else:
-        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+        fdata = filter_data(all_data, 'all')
+        title = "📋 All Data"
+
+    msg = build_report(fdata, title) or "❌ এই period এ কোনো data নেই!"
+    chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
+    for i, chunk in enumerate(chunks):
+        rm = main_kb() if i==len(chunks)-1 else None
+        await update.message.reply_text(chunk, parse_mode='Markdown', reply_markup=rm)
     return WAITING_FILTER
+
+async def handle_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.from_user.id
+    text = update.message.text.strip()
+    d = parse_date(text)
+    if not d:
+        await update.message.reply_text("❌ Date format ঠিক করো!\n_(যেমন: 01.05.2026)_", parse_mode='Markdown')
+        return WAITING_FROM
+    sessions[uid]['custom_from'] = d.date()
+    await update.message.reply_text(
+        f"✅ From: *{text}*\n\nTo date লিখো:\n_(যেমন: 07.05.2026)_",
+        parse_mode='Markdown'
+    )
+    return WAITING_TO
+
+async def handle_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.from_user.id
+    text = update.message.text.strip()
+    d = parse_date(text)
+    if not d:
+        await update.message.reply_text("❌ Date format ঠিক করো!\n_(যেমন: 07.05.2026)_", parse_mode='Markdown')
+        return WAITING_TO
+
+    df = sessions[uid].get('custom_from')
+    dt = d.date()
+    all_data = sessions[uid]['all_data']
+
+    fdata = filter_data(all_data, 'range', df=df, dt=dt)
+    from_str = df.strftime('%d.%m.%Y')
+    to_str = dt.strftime('%d.%m.%Y')
+    title = f"📆 {from_str} → {to_str}"
+    msg = build_report(fdata, title) or "❌ এই range এ কোনো data নেই!"
+    chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
+    for i, chunk in enumerate(chunks):
+        rm = main_kb() if i==len(chunks)-1 else None
+        await update.message.reply_text(chunk, parse_mode='Markdown', reply_markup=rm)
+    return WAITING_FILTER
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ তুমি admin না!")
+        return
+    users = load_users()
+    if not users:
+        await update.message.reply_text("কেউ এখনো bot use করেনি!")
+        return
+    msg = f"👥 *Bot Users ({len(users)} জন)*\n{'━'*22}\n\n"
+    for uid, u in users.items():
+        msg += (
+            f"👤 *{u['name']}*\n"
+            f"   {u['username']}\n"
+            f"   🔍 Searches: *{u['searches']}*\n"
+            f"   📅 First: _{u['first_seen']}_\n"
+            f"   🕐 Last: _{u['last_seen']}_\n\n"
+        )
+    chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
+    for chunk in chunks:
+        await update.message.reply_text(chunk, parse_mode='Markdown')
+
+async def check_sheet_updates(context):
+    global last_count
+    try:
+        rows = get_rows()
+        current_count = len(rows)
+        today_str = datetime.now().strftime('%d.%m.%Y')
+
+        if last_count[0] > 0 and current_count > last_count[0]:
+            users = load_users()
+            new_rows = current_count - last_count[0]
+            notif_msg = (
+                f"🔔 *নতুন Report এসেছে!*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 আজকের Date: *{today_str}*\n"
+                f"📊 নতুন entries: *{new_rows}টি*\n\n"
+                f"👉 /start লিখে দেখো!"
+            )
+            for uid_str, u in users.items():
+                try:
+                    await context.bot.send_message(
+                        chat_id=u['id'],
+                        text=notif_msg,
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Notify error {uid_str}: {e}")
+
+        last_count[0] = current_count
+    except Exception as e:
+        logger.error(f"Check error: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ বাতিল।", reply_markup=ReplyKeyboardRemove())
@@ -259,6 +388,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+
     conv = ConversationHandler(
         entry_points=[
             CommandHandler('start', start),
@@ -266,11 +396,19 @@ def main():
         ],
         states={
             WAITING_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username)],
-            WAITING_FILTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_filter)]
+            WAITING_FILTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_filter)],
+            WAITING_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_from)],
+            WAITING_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_to)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+
     app.add_handler(conv)
+    app.add_handler(CommandHandler('admin', admin_cmd))
+
+    # Check every 5 minutes for new sheet data
+    app.job_queue.run_repeating(check_sheet_updates, interval=300, first=10)
+
     print("✅ Bot চালু!")
     app.run_polling()
 
