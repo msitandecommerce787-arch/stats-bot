@@ -1,4 +1,4 @@
-import logging, os, requests, csv, io, json
+import logging, os, requests, csv, io, json, threading, time, asyncio
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -12,11 +12,13 @@ USERS_FILE = "users.json"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-WAITING_USERNAME, WAITING_FILTER, WAITING_FROM, WAITING_TO, WAITING_SPECIFIC = 1, 2, 3, 4, 5
+WAITING_USERNAME, WAITING_FILTER, WAITING_FROM, WAITING_TO = 1, 2, 3, 4
 
 sessions = {}
 last_count = [0]
-notified_today = [set()]
+app_ref = [None]
+
+DATE_COL, NICK_COL, INO_COL, CNO_COL, FINAL_COL, SOURCE_COL = 0, 1, 3, 5, 6, 7
 
 def load_users():
     try:
@@ -71,17 +73,17 @@ def find_user(username, rows):
     ul = username.strip().lower()
     for row in rows:
         if len(row) < 2: continue
-        if row[1].strip().lower() == ul:
-            ds = row[0].strip() if row[0].strip() else None
+        if row[NICK_COL].strip().lower() == ul:
+            ds = row[DATE_COL].strip()
             if not ds: continue
             res[ds] = {
                 'date_str': ds,
                 'date_obj': parse_date(ds),
-                'nick': row[1].strip(),
-                'ino': row[3].strip() if len(row) > 3 else '—',
-                'cno': row[5].strip() if len(row) > 5 else '—',
-                'final': row[6].strip() if len(row) > 6 else '—',
-                'source': row[7].strip() if len(row) > 7 else '—',
+                'nick': row[NICK_COL].strip(),
+                'ino': row[INO_COL].strip() if len(row) > INO_COL else '—',
+                'cno': row[CNO_COL].strip() if len(row) > CNO_COL else '—',
+                'final': row[FINAL_COL].strip() if len(row) > FINAL_COL else '—',
+                'source': row[SOURCE_COL].strip() if len(row) > SOURCE_COL else '—',
             }
     return res or None
 
@@ -111,22 +113,17 @@ def filter_data(all_data, mode, **kw):
         for ds, row in udata.items():
             d = row['date_obj']
             ok = False
-            if mode == 'today':
-                ok = bool(d and d.date() == today)
-            elif mode == 'last_n':
-                ok = bool(d and d.date() >= today - timedelta(days=kw.get('n',7)-1))
+            if mode == 'today': ok = bool(d and d.date() == today)
+            elif mode == 'last_n': ok = bool(d and d.date() >= today - timedelta(days=kw.get('n',7)-1))
             elif mode == 'range':
                 df, dt = kw.get('df'), kw.get('dt')
                 ok = bool(d and df and dt and df <= d.date() <= dt)
             elif mode == 'specific':
                 tgt = kw.get('tgt')
                 ok = bool(d and tgt and d.date() == tgt)
-            elif mode == 'all':
-                ok = True
-            if ok:
-                filtered[ds] = row
-        if filtered:
-            res[uname] = filtered
+            elif mode == 'all': ok = True
+            if ok: filtered[ds] = row
+        if filtered: res[uname] = filtered
     return res
 
 def build_report(fdata, title):
@@ -141,11 +138,6 @@ def build_report(fdata, title):
     if count > 1:
         msg += f"{'━'*22}\n📈 *Total Final Adds: {total}*\n👥 *Entries: {count}*"
     return msg
-
-async def send_msg(update, msg, rm=None):
-    for i, chunk in enumerate([msg[i:i+4000] for i in range(0,len(msg),4000)]):
-        await update.message.reply_text(chunk, parse_mode='Markdown',
-            reply_markup=rm if i == len(msg)//4000 else None)
 
 def main_kb():
     today = datetime.now().strftime('%d.%m.%Y')
@@ -174,12 +166,9 @@ def date_kb(all_data):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.message.from_user)
     await update.message.reply_text(
-        "🤖 *ADDS TRACKER BOT*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 *ADDS TRACKER BOT*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👤 Username লিখো!\n\n"
-        "💡 _একাধিক username:_\n"
-        "_space দিয়ে লিখো_\n"
-        "_(যেমন: DANIELghjo ESMEExvbw)_",
+        "💡 _একাধিক username:_\n_space দিয়ে লিখো_",
         parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
     )
     return WAITING_USERNAME
@@ -248,10 +237,7 @@ async def handle_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if sel == '📆 Custom Range':
         await update.message.reply_text(
-            "📆 *Custom Date Range*\n\n"
-            "From date লিখো:\n"
-            "_(Format: DD.MM.YYYY)_\n"
-            "_(যেমন: 01.05.2026)_",
+            "📆 *Custom Date Range*\n\nFrom date লিখো:\n_(যেমন: 01.05.2026)_",
             parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
         )
         return WAITING_FROM
@@ -262,8 +248,7 @@ async def handle_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Date ঠিকমতো select করো!", reply_markup=date_kb(all_data))
             return WAITING_FILTER
         fdata = filter_data(all_data, 'specific', tgt=d.date())
-        title = f"📅 {sel}"
-        msg = build_report(fdata, title) or f"❌ *{sel}* তারিখে data নেই!"
+        msg = build_report(fdata, f"📅 {sel}") or f"❌ *{sel}* তারিখে data নেই!"
         chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
         for i, chunk in enumerate(chunks):
             rm = date_kb(all_data) if i==len(chunks)-1 else None
@@ -295,35 +280,30 @@ async def handle_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
-    text = update.message.text.strip()
-    d = parse_date(text)
+    d = parse_date(update.message.text.strip())
     if not d:
-        await update.message.reply_text("❌ Date format ঠিক করো!\n_(যেমন: 01.05.2026)_", parse_mode='Markdown')
+        await update.message.reply_text("❌ Format ঠিক করো! _(যেমন: 01.05.2026)_", parse_mode='Markdown')
         return WAITING_FROM
     sessions[uid]['custom_from'] = d.date()
     await update.message.reply_text(
-        f"✅ From: *{text}*\n\nTo date লিখো:\n_(যেমন: 07.05.2026)_",
+        f"✅ From: *{update.message.text.strip()}*\n\nTo date লিখো:\n_(যেমন: 07.05.2026)_",
         parse_mode='Markdown'
     )
     return WAITING_TO
 
 async def handle_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
-    text = update.message.text.strip()
-    d = parse_date(text)
+    d = parse_date(update.message.text.strip())
     if not d:
-        await update.message.reply_text("❌ Date format ঠিক করো!\n_(যেমন: 07.05.2026)_", parse_mode='Markdown')
+        await update.message.reply_text("❌ Format ঠিক করো! _(যেমন: 07.05.2026)_", parse_mode='Markdown')
         return WAITING_TO
-
     df = sessions[uid].get('custom_from')
     dt = d.date()
     all_data = sessions[uid]['all_data']
-
     fdata = filter_data(all_data, 'range', df=df, dt=dt)
     from_str = df.strftime('%d.%m.%Y')
     to_str = dt.strftime('%d.%m.%Y')
-    title = f"📆 {from_str} → {to_str}"
-    msg = build_report(fdata, title) or "❌ এই range এ কোনো data নেই!"
+    msg = build_report(fdata, f"📆 {from_str} → {to_str}") or "❌ এই range এ কোনো data নেই!"
     chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
     for i, chunk in enumerate(chunks):
         rm = main_kb() if i==len(chunks)-1 else None
@@ -339,55 +319,52 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("কেউ এখনো bot use করেনি!")
         return
     msg = f"👥 *Bot Users ({len(users)} জন)*\n{'━'*22}\n\n"
-    for uid, u in users.items():
-        msg += (
-            f"👤 *{u['name']}*\n"
-            f"   {u['username']}\n"
-            f"   🔍 Searches: *{u['searches']}*\n"
-            f"   📅 First: _{u['first_seen']}_\n"
-            f"   🕐 Last: _{u['last_seen']}_\n\n"
-        )
+    for u in users.values():
+        msg += f"👤 *{u['name']}* {u['username']}\n🔍 Searches: *{u['searches']}* | Last: _{u['last_seen']}_\n\n"
     chunks = [msg[i:i+4000] for i in range(0,len(msg),4000)]
     for chunk in chunks:
         await update.message.reply_text(chunk, parse_mode='Markdown')
-
-async def check_sheet_updates(context):
-    global last_count
-    try:
-        rows = get_rows()
-        current_count = len(rows)
-        today_str = datetime.now().strftime('%d.%m.%Y')
-
-        if last_count[0] > 0 and current_count > last_count[0]:
-            users = load_users()
-            new_rows = current_count - last_count[0]
-            notif_msg = (
-                f"🔔 *নতুন Report এসেছে!*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 আজকের Date: *{today_str}*\n"
-                f"📊 নতুন entries: *{new_rows}টি*\n\n"
-                f"👉 /start লিখে দেখো!"
-            )
-            for uid_str, u in users.items():
-                try:
-                    await context.bot.send_message(
-                        chat_id=u['id'],
-                        text=notif_msg,
-                        parse_mode='Markdown'
-                    )
-                except Exception as e:
-                    logger.error(f"Notify error {uid_str}: {e}")
-
-        last_count[0] = current_count
-    except Exception as e:
-        logger.error(f"Check error: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ বাতিল।", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+def notification_thread(loop):
+    """Background thread to check sheet updates every 5 minutes"""
+    while True:
+        try:
+            time.sleep(300)  # 5 minutes
+            rows = get_rows()
+            current_count = len(rows)
+            if last_count[0] > 0 and current_count > last_count[0]:
+                users = load_users()
+                today_str = datetime.now().strftime('%d.%m.%Y')
+                new_rows = current_count - last_count[0]
+                notif_msg = (
+                    f"🔔 *নতুন Report এসেছে!*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📅 আজকের Date: *{today_str}*\n"
+                    f"📊 নতুন entries: *{new_rows}টি*\n\n"
+                    f"👉 Username লিখে এখনই দেখো!"
+                )
+                app = app_ref[0]
+                if app:
+                    for u in users.values():
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(
+                                app.bot.send_message(chat_id=u['id'], text=notif_msg, parse_mode='Markdown'),
+                                loop
+                            )
+                            future.result(timeout=10)
+                        except Exception as e:
+                            logger.error(f"Notify error: {e}")
+            last_count[0] = current_count
+        except Exception as e:
+            logger.error(f"Thread error: {e}")
+
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    app_ref[0] = application
 
     conv = ConversationHandler(
         entry_points=[
@@ -403,14 +380,28 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
-    app.add_handler(conv)
-    app.add_handler(CommandHandler('admin', admin_cmd))
+    application.add_handler(conv)
+    application.add_handler(CommandHandler('admin', admin_cmd))
 
-    # Check every 5 minutes for new sheet data
-    app.job_queue.run_repeating(check_sheet_updates, interval=300, first=10)
+    # Initialize sheet count
+    rows = get_rows()
+    last_count[0] = len(rows)
+
+    # Start notification thread
+    loop = asyncio.new_event_loop()
+
+    def run_loop():
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop, daemon=True)
+    loop_thread.start()
+
+    notif_thread = threading.Thread(target=notification_thread, args=(loop,), daemon=True)
+    notif_thread.start()
 
     print("✅ Bot চালু!")
-    app.run_polling()
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
