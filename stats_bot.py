@@ -336,15 +336,15 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions.pop(uid, None)
         await update.message.reply_text(
             "🔁 *Bot Reset হয়েছে!*\n\n👤 Username লিখো:",
-            parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
+            parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True)
         )
         return WAITING_USERNAME
 
     if text in ['🔄 New Search', '❌ Exit']:
-        await update.message.reply_text("👤 Username লিখো:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("👤 Username লিখো:", reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
         return WAITING_USERNAME
 
-    await update.message.reply_text("⏳ _Searching..._", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("⏳ _Searching..._", parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
     rows = get_rows()
     if not rows or len(rows) < 2:
         await update.message.reply_text("❌ Sheet connect হচ্ছে না! একটু পরে try করো।")
@@ -385,21 +385,21 @@ async def handle_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions.pop(uid, None)
         await update.message.reply_text(
             "🔁 *Bot Reset হয়েছে!*\n\n👤 Username লিখো:",
-            parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
+            parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True)
         )
         return WAITING_USERNAME
 
     if sel == '❌ Exit':
-        await update.message.reply_text("👋 _Bye!_", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("👋 _Bye!_", parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
         return WAITING_USERNAME
 
     if sel == '🔄 New Search':
         sessions.pop(uid, None)
-        await update.message.reply_text("👤 Username লিখো:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("👤 Username লিখো:", reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
         return WAITING_USERNAME
 
     if uid not in sessions:
-        await update.message.reply_text("⚠️ আবার username লিখো:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("⚠️ আবার username লিখো:", reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
         return WAITING_USERNAME
 
     all_data = sessions[uid]['all_data']
@@ -459,7 +459,7 @@ async def handle_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sel == '📆 Custom Range':
         await update.message.reply_text(
             "📆 *Custom Date Range*\n\nFrom date লিখো:\n_(যেমন: 01.05.2026)_",
-            parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
+            parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True)
         )
         return WAITING_FROM
 
@@ -504,7 +504,7 @@ async def handle_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == '🔁 Reset Bot':
         sessions.pop(uid, None)
-        await update.message.reply_text("🔁 *Bot Reset হয়েছে!*\n\n👤 Username লিখো:", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("🔁 *Bot Reset হয়েছে!*\n\n👤 Username লিখো:", parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
         return WAITING_USERNAME
     d = parse_date(text)
     if not d:
@@ -519,7 +519,7 @@ async def handle_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == '🔁 Reset Bot':
         sessions.pop(uid, None)
-        await update.message.reply_text("🔁 *Bot Reset হয়েছে!*\n\n👤 Username লিখো:", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("🔁 *Bot Reset হয়েছে!*\n\n👤 Username লিখো:", parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
         return WAITING_USERNAME
     d = parse_date(text)
     if not d:
@@ -620,7 +620,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     sessions.pop(uid, None)
-    await update.message.reply_text("❌ বাতিল।", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("❌ বাতিল।", reply_markup=ReplyKeyboardMarkup([["🔁 Reset Bot", "🔄 New Search"]], resize_keyboard=True))
     return ConversationHandler.END
 
 def notification_thread(loop):
