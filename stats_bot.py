@@ -313,11 +313,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ তোমার access নেই!")
         return ConversationHandler.END
     register_user(update.message.from_user)
+    start_kb = ReplyKeyboardMarkup([
+        ['🔁 Reset Bot', '🔄 New Search']
+    ], resize_keyboard=True)
     await update.message.reply_text(
         "🤖 *ADDS TRACKER BOT*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👤 Username লিখো!\n\n"
         "💡 *একাধিক username:*\n_space দিয়ে লিখো_",
-        parse_mode='Markdown', reply_markup=ReplyKeyboardRemove()
+        parse_mode='Markdown', reply_markup=start_kb
     )
     return WAITING_USERNAME
 
