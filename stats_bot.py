@@ -359,7 +359,13 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             not_found.append(uname)
 
     if not all_data:
-        await update.message.reply_text(f"❌ পাওয়া যায়নি: *{', '.join(not_found)}*", parse_mode='Markdown')
+        start_kb = ReplyKeyboardMarkup([
+            ['🔁 Reset Bot', '🔄 New Search']
+        ], resize_keyboard=True)
+        await update.message.reply_text(
+            f"❌ পাওয়া যায়নি: *{', '.join(not_found)}*\n\n👤 আবার username লিখো!",
+            parse_mode='Markdown', reply_markup=start_kb
+        )
         return WAITING_USERNAME
 
     sessions[uid] = {'all_data': all_data, 'rows': rows, 'mode': 'filter'}
